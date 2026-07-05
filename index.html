@@ -240,11 +240,10 @@
             <span class="eyebrow">R&amp;P</span>
             <h1>Rural & Plural: Participatory Digital Cartographies</h1>
             <p>
-                This interactive map allows participants to add points around the world with images, audio, video and contextual information.
-                Click anywhere on the map to place a new contribution and share a memory, evidence or story.
+                This interactive map will allow participants of Rural and Plural to add points around the world with images, audio, video and contextual information about their follow-up projects.
             </p>
             <p>
-                Entries are stored locally in the browser, so the map can be expanded gradually and later exported or shared.
+                Click anywhere on the map to place a new contribution and share your project or iniciative.
             </p>
 
             <div class="layout">
@@ -263,17 +262,7 @@
                         </label>
                         <label>
                             Description
-                            <textarea id="description" name="description" rows="3" placeholder="Describe the place, memory or evidence"></textarea>
-                        </label>
-                        <label>
-                            Category
-                            <select id="category" name="category">
-                                <option value="evidence">Evidence</option>
-                                <option value="image">Image</option>
-                                <option value="audio">Audio</option>
-                                <option value="video">Video</option>
-                                <option value="story">Story</option>
-                            </select>
+                            <textarea id="description" name="description" rows="3" placeholder="Describe the project, ideas, timeline and execution process"></textarea>
                         </label>
                         <div class="coords">
                             <label>
@@ -312,47 +301,22 @@
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
     <script>
         const STORAGE_KEY = 'r-and-p-participatory-map';
+        const SUPABASE_URL = 'https://olkvzgtxzecjevxlxtbr.supabase.co';
+        const SUPABASE_ANON_KEY = 'sb_publishable_VsOs852tqG484znrcays3w_-piYuk_j';
+        const TABLE_NAME = 'points';
+        const SUPABASE_HEADERS = {
+            'apikey': SUPABASE_ANON_KEY,
+            'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
+            'Content-Type': 'application/json',
+            'Prefer': 'return=representation'
+        };
+        const API_URL = `${SUPABASE_URL}/rest/v1/${TABLE_NAME}`;
 
-        const initialPoints = [
-            {
-                id: crypto.randomUUID(),
-                title: 'Shared route memory',
-                description: 'An initial story that connects different territories through a common journey.',
-                category: 'story',
-                lat: 40.4168,
-                lng: -3.7038,
-                author: 'R&P team',
-                mediaType: 'text',
-                mediaValue: ''
-            },
-            {
-                id: crypto.randomUUID(),
-                title: 'Visual evidence',
-                description: 'An image that helps frame a conversation about landscape and heritage.',
-                category: 'image',
-                lat: 19.4326,
-                lng: -99.1332,
-                author: 'Open collaboration',
-                mediaType: 'image',
-                mediaValue: 'https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?auto=format&fit=crop&w=900&q=80'
-            },
-            {
-                id: crypto.randomUUID(),
-                title: 'Field sound',
-                description: 'An audio fragment accompanying the experience of a place in transition.',
-                category: 'audio',
-                lat: -13.1631,
-                lng: -72.5450,
-                author: 'Local collective',
-                mediaType: 'audio',
-                mediaValue: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3'
-            }
-        ];
+        const initialPoints = [];
 
         const form = document.getElementById('contribution-form');
         const titleInput = document.getElementById('title');
         const descriptionInput = document.getElementById('description');
-        const categoryInput = document.getElementById('category');
         const latInput = document.getElementById('lat');
         const lngInput = document.getElementById('lng');
         const authorInput = document.getElementById('author');
@@ -361,7 +325,7 @@
         const listContainer = document.getElementById('contributions-list');
         const mapStatus = document.getElementById('map-status');
 
-        let points = loadPoints();
+        let points = [];
 
         const map = L.map('map', {
             zoomControl: true,
@@ -414,8 +378,7 @@
             titleInput.focus();
         });
 
-        renderPoints();
-        renderList();
+        loadPointsFromServer();
 
         form.addEventListener('submit', async (event) => {
             event.preventDefault();
@@ -429,7 +392,7 @@
                 id: crypto.randomUUID(),
                 title: titleInput.value.trim(),
                 description: descriptionInput.value.trim(),
-                category: categoryInput.value,
+                category: 'story',
                 lat: latValue,
                 lng: lngValue,
                 author: authorInput.value.trim(),
@@ -442,8 +405,9 @@
                 return;
             }
 
-            points.push(newPoint);
-            savePoints();
+            const savedPoint = await savePointToServer(newPoint);
+            points.push(savedPoint);
+            savePointsToStorage(points);
             renderPoints();
             renderList();
             form.reset();
@@ -453,26 +417,133 @@
                 markersLayer.removeLayer(selectedMarker);
                 selectedMarker = null;
             }
-            mapStatus.textContent = `Point saved at ${newPoint.lat.toFixed(3)}, ${newPoint.lng.toFixed(3)}.`;
+            mapStatus.textContent = savedPoint.remoteSaved
+                ? `Point saved and synced to the shared map.`
+                : savedPoint.errorMessage
+                    ? `Saved locally. Supabase error: ${savedPoint.errorMessage}`
+                    : `Point saved locally because the shared connection is unavailable.`;
             titleInput.focus();
         });
 
-        function loadPoints() {
-            const saved = localStorage.getItem(STORAGE_KEY);
-            if (!saved) {
-                return initialPoints;
+        async function loadPointsFromServer() {
+            try {
+                const response = await fetch(API_URL + '?select=*', {
+                    headers: SUPABASE_HEADERS
+                });
+                if (!response.ok) {
+                    const text = await response.text();
+                    throw new Error(text || 'Unable to load points');
+                }
+                const data = await response.json();
+                const remotePoints = Array.isArray(data) ? data : [];
+                const localPoints = loadPointsFromStorage();
+                const mergedPoints = remotePoints.length ? remotePoints : localPoints;
+
+                points = mergedPoints;
+                savePointsToStorage(points);
+                renderPoints();
+                renderList();
+
+                if (!remotePoints.length && !localPoints.length) {
+                    mapStatus.textContent = 'No shared points yet. Add the first one.';
+                }
+                return;
+            } catch (error) {
+                console.warn('Remote storage unavailable, using local storage instead.', error);
             }
 
+            points = loadPointsFromStorage();
+            renderPoints();
+            renderList();
+            mapStatus.textContent = 'Using local storage for this browser because the shared connection is temporarily unavailable.';
+        }
+
+        async function savePointToServer(point) {
+            const payloads = [
+                buildPointPayload(point, false),
+                buildPointPayload(point, true)
+            ];
+
+            for (const payload of payloads) {
+                try {
+                    const response = await fetch(API_URL, {
+                        method: 'POST',
+                        headers: SUPABASE_HEADERS,
+                        body: JSON.stringify([payload])
+                    });
+
+                    if (!response.ok) {
+                        const text = await response.text();
+                        throw new Error(text || `Unable to save point (${response.status})`);
+                    }
+
+                    const data = await response.json();
+                    const savedPoint = Array.isArray(data) ? data[0] : point;
+                    console.log('Supabase save succeeded', response.status, data);
+                    return { ...savedPoint, remoteSaved: true };
+                } catch (error) {
+                    const message = String(error.message || error);
+                    if (!message.includes('column') && !message.includes('permission') && !message.includes('policy') && !message.includes('403') && !message.includes('401')) {
+                        savePointLocally(point);
+                        return { ...point, remoteSaved: false };
+                    }
+
+                    if (payload !== payloads[payloads.length - 1]) {
+                        continue;
+                    }
+
+                    console.error('Supabase save failed:', { payload, message });
+                    savePointLocally(point);
+                    return { ...point, remoteSaved: false, errorMessage: message };
+                }
+            }
+
+            savePointLocally(point);
+            return { ...point, remoteSaved: false };
+        }
+
+        function buildPointPayload(point, useSnakeCase) {
+            const mediaField = useSnakeCase ? 'media_value' : 'mediaValue';
+            const mediaTypeField = useSnakeCase ? 'media_type' : 'mediaType';
+            return {
+                id: point.id,
+                title: point.title,
+                description: point.description,
+                category: point.category,
+                lat: point.lat,
+                lng: point.lng,
+                author: point.author,
+                [mediaTypeField]: point.mediaType || point.media_type,
+                [mediaField]: point.mediaValue || point.media_value
+            };
+        }
+
+        function loadPointsFromStorage() {
             try {
-                const parsed = JSON.parse(saved);
-                return Array.isArray(parsed) && parsed.length ? parsed : initialPoints;
+                const raw = localStorage.getItem(STORAGE_KEY);
+                if (!raw) {
+                    return [];
+                }
+                const parsed = JSON.parse(raw);
+                return Array.isArray(parsed) ? parsed : [];
             } catch (error) {
-                return initialPoints;
+                console.warn('Could not read local points.', error);
+                return [];
             }
         }
 
-        function savePoints() {
-            localStorage.setItem(STORAGE_KEY, JSON.stringify(points));
+        function savePointsToStorage(items) {
+            try {
+                localStorage.setItem(STORAGE_KEY, JSON.stringify(items));
+            } catch (error) {
+                console.warn('Could not save points locally.', error);
+            }
+        }
+
+        function savePointLocally(point) {
+            const existing = loadPointsFromStorage();
+            existing.push(point);
+            savePointsToStorage(existing);
         }
 
         function renderPoints() {
@@ -505,20 +576,23 @@
         }
 
         function renderPreview(point) {
-            if (!point.mediaValue) {
+            const mediaValue = getPointValue(point, 'mediaValue', 'media_value');
+            const mediaType = getPointValue(point, 'mediaType', 'media_type');
+
+            if (!mediaValue) {
                 return '';
             }
 
-            if (point.mediaType === 'image') {
-                return `<img class="preview" src="${escapeAttr(point.mediaValue)}" alt="${escapeAttr(point.title)}">`;
+            if (mediaType === 'image') {
+                return `<img class="preview" src="${escapeAttr(mediaValue)}" alt="${escapeAttr(point.title)}">`;
             }
 
-            if (point.mediaType === 'audio') {
-                return `<audio controls class="preview" src="${escapeAttr(point.mediaValue)}"></audio>`;
+            if (mediaType === 'audio') {
+                return `<audio controls class="preview" src="${escapeAttr(mediaValue)}"></audio>`;
             }
 
-            if (point.mediaType === 'video') {
-                return `<video controls class="preview" src="${escapeAttr(point.mediaValue)}"></video>`;
+            if (mediaType === 'video') {
+                return `<video controls class="preview" src="${escapeAttr(mediaValue)}"></video>`;
             }
 
             return '';
@@ -537,23 +611,30 @@
         }
 
         function renderPopupMedia(point) {
-            if (!point.mediaValue) {
+            const mediaValue = getPointValue(point, 'mediaValue', 'media_value');
+            const mediaType = getPointValue(point, 'mediaType', 'media_type');
+
+            if (!mediaValue) {
                 return '';
             }
 
-            if (point.mediaType === 'image') {
-                return `<img class="preview" src="${escapeAttr(point.mediaValue)}" alt="${escapeAttr(point.title)}">`;
+            if (mediaType === 'image') {
+                return `<img class="preview" src="${escapeAttr(mediaValue)}" alt="${escapeAttr(point.title)}">`;
             }
 
-            if (point.mediaType === 'audio') {
-                return `<audio controls src="${escapeAttr(point.mediaValue)}"></audio>`;
+            if (mediaType === 'audio') {
+                return `<audio controls src="${escapeAttr(mediaValue)}"></audio>`;
             }
 
-            if (point.mediaType === 'video') {
-                return `<video controls src="${escapeAttr(point.mediaValue)}"></video>`;
+            if (mediaType === 'video') {
+                return `<video controls src="${escapeAttr(mediaValue)}"></video>`;
             }
 
             return '';
+        }
+
+        function getPointValue(point, camelCaseKey, snakeCaseKey) {
+            return point[camelCaseKey] ?? point[snakeCaseKey] ?? '';
         }
 
         function getMarkerIcon(category) {
